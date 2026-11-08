@@ -1,0 +1,51 @@
+[package]
+name = "usbip-client"
+version = "0.1.2"
+edition = "2021"
+description = "System-tray USB/IP client: lists ESP32 USB/IP servers on the LAN and attaches their devices"
+license = "MIT"
+authors = ["PLD Industries"]
+
+[dependencies]
+tao = "0.37.2"
+tray-icon = "0.26.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+# ── Linux packages (cargo install cargo-deb cargo-generate-rpm) ───────────────
+[package.metadata.deb]
+name = "usbip-client"
+maintainer = "PLD Industries"
+section = "net"
+depends = "$auto, libgtk-3-0, libayatana-appindicator3-1, policykit-1"
+assets = [
+    ["target/release/usbip-client", "usr/bin/", "755"],
+    ["packaging/linux/usbip-client.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/usbip-client.desktop", "etc/xdg/autostart/", "644"],
+    ["packaging/linux/usbip-client.conf", "etc/modules-load.d/", "644"],
+    ["assets/usbip-client.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "usbip-client"
+assets = [
+    { source = "target/release/usbip-client", dest = "/usr/bin/usbip-client", mode = "755" },
+    { source = "packaging/linux/usbip-client.desktop", dest = "/usr/share/applications/usbip-client.desktop", mode = "644" },
+    { source = "packaging/linux/usbip-client.desktop", dest = "/etc/xdg/autostart/usbip-client.desktop", mode = "644" },
+    { source = "packaging/linux/usbip-client.conf", dest = "/etc/modules-load.d/usbip-client.conf", mode = "644" },
+    { source = "assets/usbip-client.png", dest = "/usr/share/icons/hicolor/256x256/apps/usbip-client.png", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+gtk3 = "*"
+polkit = "*"
