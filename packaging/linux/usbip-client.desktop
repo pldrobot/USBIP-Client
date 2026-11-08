@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=USBIP Client
+Comment=Attach USB devices shared by ESP32 USB/IP servers
+Exec=/usr/bin/usbip-client
+Icon=usbip-client
+Categories=Network;Utility;
+Terminal=false
+X-GNOME-Autostart-enabled=true
