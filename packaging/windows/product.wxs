@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX 3 MSI with installer pages:
+    Welcome > Install folder > Shortcuts (Start menu / Desktop / start with Windows) > Ready > Progress > Finish
+  Everything lives under C:\Program Files\USBIP-Client:
+    usbip-client.exe
+    usbip-win2\   (usbip.exe + driver, from the embedded usbip-win2 installer, GUI component skipped)
+  Silent install options: msiexec /i ... /qn INSTALL_STARTMENU=0 INSTALL_DESKTOP=0 INSTALL_AUTOSTART=0
+  Build with packaging\windows\build.ps1
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*" Name="USBIP Client" Language="1033" Version="$(var.Version)"
+           Manufacturer="PLD Industries" UpgradeCode="8B0E2C57-4C0B-4C57-9F38-5A3E7C1D2A10">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             InstallPrivileges="elevated" Platform="x64" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+    <!-- Defaults for the Shortcuts page -->
+    <Property Id="INSTALL_STARTMENU" Value="1" />
+    <Property Id="INSTALL_DESKTOP" Value="1" />
+    <Property Id="INSTALL_AUTOSTART" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="USBIP-Client" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="AppExe" Guid="*" Win64="yes">
+        <File Id="UsbipClientExe" Source="$(var.ExePath)" KeyPath="yes" />
+      </Component>
+      <Component Id="Licenses" Guid="*" Win64="yes">
+        <File Id="UsbipWin2License" Source="$(var.LicensePath)" KeyPath="yes" Name="LICENSE-usbip-win2.txt" />
+      </Component>
+      <!-- usbip-win2 is installed here by the embedded installer; remove its folder on uninstall -->
+      <Component Id="UsbipWin2Cleanup" Guid="*" Win64="yes">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\PLDIndustries\USBIPClient" Name="cleanup"
+                       Type="integer" Value="1" KeyPath="yes" />
+        <util:RemoveFolderEx On="uninstall" Property="USBIPWIN2DIR" />
+      </Component>
+      <!-- Optional: start in the system tray at login (all users) -->
+      <Component Id="AutostartEntry" Guid="*" Win64="yes">
+        <Condition>INSTALL_AUTOSTART = "1"</Condition>
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                       Name="USBIPClient" Type="string" Value="&quot;[INSTALLFOLDER]usbip-client.exe&quot;" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*" Win64="yes">
+        <Condition>INSTALL_STARTMENU = "1"</Condition>
+        <Shortcut Id="StartMenuLink" Name="USBIP Client" Target="[INSTALLFOLDER]usbip-client.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon.ico" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\PLDIndustries\USBIPClient" Name="startmenu"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*" Win64="yes">
+        <Condition>INSTALL_DESKTOP = "1"</Condition>
+        <Shortcut Id="DesktopLink" Name="USBIP Client" Target="[INSTALLFOLDER]usbip-client.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon.ico" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\PLDIndustries\USBIPClient" Name="desktop"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <SetProperty Id="USBIPWIN2DIR" Value="[INSTALLFOLDER]usbip-win2" Before="CostFinalize" Sequence="execute" />
+
+    <Feature Id="Main" Title="USBIP Client" Level="1">
+      <ComponentRef Id="AppExe" />
+      <ComponentRef Id="Licenses" />
+      <ComponentRef Id="UsbipWin2Cleanup" />
+      <ComponentRef Id="AutostartEntry" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <!-- ── usbip-win2 installer embedded in the MSI (main + client components only: no GUI app) ── -->
+    <Binary Id="UsbipSetup" SourceFile="$(var.RedistPath)" />
+    <CustomAction Id="InstallUsbipWin2" BinaryKey="UsbipSetup"
+                  ExeCommand="/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS /COMPONENTS=&quot;main,client&quot; &quot;/DIR=[INSTALLFOLDER]usbip-win2&quot;"
+                  Execute="deferred" Impersonate="no" Return="check" />
+
+    <!-- Uninstall the driver package before our files are removed -->
+    <CustomAction Id="UninstallUsbipWin2" Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]usbip-win2\unins000.exe&quot; /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallUsbipWin2" After="InstallFiles">NOT Installed</Custom>
+      <Custom Action="UninstallUsbipWin2" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+
+    <!-- ── UI ── -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch USBIP Client" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <UIRef Id="WixUI_InstallDir" />
+    <UI>
+      <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="300" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts and startup" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose how USBIP Client is added to your system." />
+        <Control Id="StartMenuCb" Type="CheckBox" X="25" Y="64" Width="320" Height="18" Property="INSTALL_STARTMENU" CheckBoxValue="1" Text="Add a &amp;Start menu shortcut" />
+        <Control Id="DesktopCb" Type="CheckBox" X="25" Y="90" Width="320" Height="18" Property="INSTALL_DESKTOP" CheckBoxValue="1" Text="Add a &amp;Desktop shortcut" />
+        <Control Id="AutostartCb" Type="CheckBox" X="25" Y="116" Width="320" Height="18" Property="INSTALL_AUTOSTART" CheckBoxValue="1" Text="Start in the system &amp;tray when Windows starts" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- Skip the license page; insert the Shortcuts page after the folder page -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="5">NOT Installed</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="5">1</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="5">WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID="1"</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="5">NOT Installed</Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApp">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Publish>
+    </UI>
+    <CustomAction Id="LaunchApp" FileKey="UsbipClientExe" ExeCommand="" Return="asyncNoWait" />
+  </Product>
+</Wix>
