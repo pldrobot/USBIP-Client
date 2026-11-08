@@ -9,6 +9,12 @@ icon to see the servers found on the LAN (checked = attached; click to attach/de
 - Windows: calls `usbip.exe` from the bundled usbip-win2 install (BSD-2 licensed).
 - Linux: uses the kernel `vhci_hcd` sysfs interface directly; privileged step runs via `pkexec`.
 
+## usbip-win2 reference
+
+The Windows attach backend uses [usbip-win2](https://github.com/vadimgrn/usbip-win2) (BSD-2-Clause).
+Reference fork: https://github.com/pldrobot/usbip-win2 (synced with upstream). `build.ps1` downloads the
+release installer from the fork first, then upstream, and embeds it in the MSI.
+
 ## Build
 
     cargo build --release
