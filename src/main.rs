@@ -26,6 +26,24 @@ fn icon(active: bool) -> Icon {
 
 fn build_menu(servers: &[Server], attached: &[attach::Key], error: &Option<String>) -> Menu {
     let menu = Menu::new();
+    if !attached.is_empty() {
+        for (host, busid) in attached {
+            let dev = servers
+                .iter()
+                .filter(|s| s.host == *host)
+                .flat_map(|s| s.devices.iter())
+                .find(|d| d.busid == *busid)
+                .map(|d| d.label())
+                .unwrap_or_else(|| busid.to_string());
+            let _ = menu.append(&MenuItem::with_id(
+                format!("conn|{host}|{busid}"),
+                format!("● Connected: {host} — {dev}"),
+                false,
+                None,
+            ));
+        }
+        let _ = menu.append(&PredefinedMenuItem::separator());
+    }
     let mut any = false;
     for s in servers {
         if s.devices.is_empty() {
@@ -36,6 +54,16 @@ fn build_menu(servers: &[Server], attached: &[attach::Key], error: &Option<Strin
             let on = attached.iter().any(|(h, b)| *h == s.host && *b == d.busid);
             let id = format!("dev|{}|{}", s.host, d.busid);
             let _ = menu.append(&CheckMenuItem::with_id(id, format!("{} — {}", s.host, d.label()), true, on, None));
+            any = true;
+        }
+    }
+    // A server we're attached to usually stops answering scans (it's busy serving us), so it
+    // may be missing from `servers`. Keep it in the menu so it can still be detached.
+    for (host, busid) in attached {
+        let listed = servers.iter().any(|s| s.host == *host && s.devices.iter().any(|d| d.busid == *busid));
+        if !listed {
+            let id = format!("dev|{host}|{busid}");
+            let _ = menu.append(&CheckMenuItem::with_id(id, format!("{host} — {busid}"), true, true, None));
             any = true;
         }
     }
@@ -98,7 +126,14 @@ fn main() {
                     .map_err(|e| eprintln!("tray: {e}"))
                     .ok();
             }
-            Event::UserEvent(Ev::Scanned(s)) => {
+            Event::UserEvent(Ev::Scanned(mut s)) => {
+                // Keep last-known entries (with device labels) for servers we're attached to.
+                for old in &servers {
+                    if attached.iter().any(|(h, _)| *h == old.host) && !s.iter().any(|x| x.host == old.host) {
+                        s.push(old.clone());
+                    }
+                }
+                s.sort_by(|a, b| a.host.cmp(&b.host));
                 servers = s;
                 refresh_ui = true;
             }
