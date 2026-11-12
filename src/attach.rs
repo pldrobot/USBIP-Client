@@ -94,26 +94,54 @@ mod imp {
     use std::io::Write;
     use std::os::unix::io::AsRawFd;
     use std::process::Command;
-    use std::sync::Mutex;
 
     const VHCI: &str = "/sys/devices/platform/vhci_hcd.0";
-    /// (vhci port, host, busid) for attachments made by this process / its helper.
-    static MAP: Mutex<Vec<(u32, String, String)>> = Mutex::new(Vec::new());
+    type Row = (String, u32, u32, u32); // (hub, port, status, devid)
 
-    /// (hub, port, status) rows from the vhci status file.
-    fn status_rows() -> Vec<(String, u32, u32)> {
+    /// Rows from the vhci status file: "hub port sta spd dev sockfd local_busid".
+    fn status_rows() -> Vec<Row> {
         let text = std::fs::read_to_string(format!("{VHCI}/status")).unwrap_or_default();
         text.lines()
             .skip(1)
             .filter_map(|l| {
                 let f: Vec<&str> = l.split_whitespace().collect();
-                Some((f.first()?.to_string(), f.get(1)?.parse().ok()?, f.get(2)?.parse().ok()?))
+                let dev = u32::from_str_radix(f.get(4)?, 16).ok()?;
+                Some((f.first()?.to_string(), f.get(1)?.parse().ok()?, f.get(2)?.parse().ok()?, dev))
             })
             .collect()
     }
 
+    /// Attachments made by this app live in a user file ("port devid host busid" per line), so they
+    /// survive an app restart. Entries whose vhci port is no longer in use for that device are dropped.
+    fn state_path() -> std::path::PathBuf {
+        crate::discover::config_dir().join("attached.txt")
+    }
+
+    fn load() -> Vec<(u32, u32, String, String)> {
+        let used: Vec<(u32, u32)> = status_rows().into_iter().filter(|r| r.2 == 6).map(|r| (r.1, r.3)).collect();
+        std::fs::read_to_string(state_path())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (p, d) = (f.next()?.parse().ok()?, u32::from_str_radix(f.next()?, 16).ok()?);
+                Some((p, d, f.next()?.to_string(), f.next()?.to_string()))
+            })
+            .filter(|(p, d, _, _)| used.contains(&(*p, *d)))
+            .collect()
+    }
+
+    fn save(v: &[(u32, u32, String, String)]) {
+        let text: String = v.iter().map(|(p, d, h, b)| format!("{p} {d:x} {h} {b}\n")).collect();
+        let path = state_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, text);
+    }
+
     /// Runs as root (directly or via pkexec). Returns the vhci port.
-    fn do_attach(host: &str, busid: &str) -> Result<u32, String> {
+    fn do_attach(host: &str, busid: &str) -> Result<(u32, u32), String> {
         let _ = Command::new("modprobe").arg("vhci_hcd").status();
         let addr = discover_addr(host)?;
         let (stream, dev) = proto::import(addr, busid).map_err(|e| e.to_string())?;
@@ -121,8 +149,8 @@ mod imp {
         // sta 4 == VDEV_ST_NULL (free)
         let port = status_rows()
             .into_iter()
-            .find(|(hub, _, sta)| hub == want_hub && *sta == 4)
-            .map(|(_, p, _)| p)
+            .find(|(hub, _, sta, _)| hub == want_hub && *sta == 4)
+            .map(|(_, p, _, _)| p)
             .ok_or("no free vhci port (is vhci_hcd loaded?)")?;
         let line = format!("{} {} {} {}", port, stream.as_raw_fd(), dev.devid(), dev.speed);
         std::fs::OpenOptions::new()
@@ -130,7 +158,7 @@ mod imp {
             .open(format!("{VHCI}/attach"))
             .and_then(|mut f| f.write_all(line.as_bytes()))
             .map_err(|e| format!("vhci attach failed: {e}"))?;
-        Ok(port) // dropping `stream` is fine: the kernel holds its own reference
+        Ok((port, dev.devid())) // dropping `stream` is fine: the kernel holds its own reference
     }
 
     fn do_detach(port: u32) -> Result<(), String> {
@@ -174,33 +202,33 @@ mod imp {
 
     pub fn attach(host: &str, busid: &str) -> Result<(), String> {
         let out = elevated(&["--attach", host, busid])?;
-        let port: u32 = out
+        let (port, devid) = out
             .lines()
-            .find_map(|l| l.strip_prefix("PORT ")?.trim().parse().ok())
+            .find_map(|l| {
+                let mut f = l.strip_prefix("PORT ")?.split_whitespace();
+                Some((f.next()?.parse().ok()?, u32::from_str_radix(f.next()?, 16).ok()?))
+            })
             .ok_or("helper did not report a port")?;
-        MAP.lock().unwrap().push((port, host.into(), busid.into()));
+        let mut v = load();
+        v.push((port, devid, host.into(), busid.into()));
+        save(&v);
         Ok(())
     }
 
     pub fn detach(host: &str, busid: &str) -> Result<(), String> {
-        let port = MAP
-            .lock()
-            .unwrap()
+        let v = load();
+        let port = v
             .iter()
-            .find(|(_, h, b)| h == host && b == busid)
-            .map(|(p, _, _)| *p)
+            .find(|(_, _, h, b)| h == host && b == busid)
+            .map(|e| e.0)
             .ok_or("device was not attached by this app")?;
         elevated(&["--detach", &port.to_string()])?;
-        MAP.lock().unwrap().retain(|(p, _, _)| *p != port);
+        save(&v.into_iter().filter(|e| e.0 != port).collect::<Vec<_>>());
         Ok(())
     }
 
     pub fn attached() -> Vec<Key> {
-        // sta 6 == VDEV_ST_USED; drop map entries whose port is no longer in use.
-        let used: Vec<u32> = status_rows().into_iter().filter(|r| r.2 == 6).map(|r| r.1).collect();
-        let mut map = MAP.lock().unwrap();
-        map.retain(|(p, _, _)| used.contains(p));
-        map.iter().map(|(_, h, b)| (h.clone(), b.clone())).collect()
+        load().into_iter().map(|(_, _, h, b)| (h, b)).collect()
     }
 
     /// `usbip-client --attach HOST BUSID` / `--detach PORT`: privileged helper entry point.
@@ -208,8 +236,8 @@ mod imp {
         let a: Vec<String> = std::env::args().collect();
         match a.get(1).map(String::as_str) {
             Some("--attach") if a.len() == 4 => match do_attach(&a[2], &a[3]) {
-                Ok(p) => {
-                    println!("PORT {p}");
+                Ok((p, d)) => {
+                    println!("PORT {p} {d:x}");
                     std::process::exit(0)
                 }
                 Err(e) => {

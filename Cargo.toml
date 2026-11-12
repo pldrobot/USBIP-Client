@@ -25,9 +25,9 @@ panic = "abort"
 # ── Linux packages (cargo install cargo-deb cargo-generate-rpm) ───────────────
 [package.metadata.deb]
 name = "usbip-client"
-maintainer = "PLD Industries"
+maintainer = "pldrobot"
 section = "net"
-depends = "$auto, libgtk-3-0, libayatana-appindicator3-1, policykit-1"
+depends = "$auto, libgtk-3-0, libayatana-appindicator3-1, pkexec | policykit-1"
 assets = [
     ["target/release/usbip-client", "usr/bin/", "755"],
     ["packaging/linux/usbip-client.desktop", "usr/share/applications/", "644"],
