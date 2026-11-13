@@ -1,8 +1,8 @@
-# Builds the Windows MSI: dist\usbip-client-<ver>-x64.msi
+# Builds dist\usbip-client.exe and dist\usbip-client-<ver>-x64.msi
 # Requires: Rust. WiX 3 binaries are downloaded to tools\wix3 on first run (no .NET SDK needed).
 $ErrorActionPreference = 'Stop'
-$root    = Resolve-Path "$PSScriptRoot\..\.."
-$redist  = Join-Path $PSScriptRoot 'redist'
+$root    = $PSScriptRoot
+$redist  = Join-Path $PSScriptRoot 'packaging\windows\redist'
 $version = (Select-String -Path "$root\Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $tag     = 'v.0.9.8.1'                      # usbip-win2 release to bundle
 $asset   = 'USBip-0.9.8.1-x64.exe'
@@ -44,13 +44,15 @@ Push-Location $root
 cargo build --release
 if ($LASTEXITCODE) { throw 'cargo build failed' }
 New-Item -ItemType Directory -Force dist | Out-Null
+Copy-Item "$root\target\release\usbip-client.exe" "$root\dist\usbip-client.exe" -Force
 
 $obj = Join-Path $root 'dist\product.wixobj'
 $msi = Join-Path $root "dist\usbip-client-$version-x64.msi"
 & "$wix\candle.exe" -nologo -arch x64 "-dVersion=$version" "-dExePath=$root\target\release\usbip-client.exe" `
-    "-dIconPath=$root\assets\logo.ico" "-dRedistPath=$setup" "-dLicensePath=$lic" -ext WixUtilExtension -out $obj "$PSScriptRoot\product.wxs"
+    "-dIconPath=$root\assets\logo.ico" "-dRedistPath=$setup" "-dLicensePath=$lic" -ext WixUtilExtension -out $obj "$PSScriptRoot\packaging\windows\product.wxs"
 if ($LASTEXITCODE) { throw 'candle failed' }
 & "$wix\light.exe" -nologo -ext WixUIExtension -ext WixUtilExtension -sice:ICE38 -sice:ICE43 -sice:ICE57 -sice:ICE64 -o $msi $obj
 if ($LASTEXITCODE) { throw 'light failed' }
 Pop-Location
+Write-Host "Built $root\dist\usbip-client.exe"
 Write-Host "Built $msi"

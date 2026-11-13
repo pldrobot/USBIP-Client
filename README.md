@@ -23,10 +23,15 @@ Linux build deps: `libgtk-3-dev libayatana-appindicator3-dev libxdo-dev`.
 
 ## Packaging
 
-- Windows: `powershell packaging\windows\build.ps1` → `dist\usbip-client-<ver>-x64.msi`
-  (WiX 3 is auto-downloaded to `tools\wix3`). One UAC prompt installs the app, the usbip-win2 driver and autostart.
-- Linux: `cargo install cargo-deb cargo-generate-rpm`, then `cargo deb` or
-  `cargo build --release && cargo generate-rpm`. Packages add XDG autostart and load `vhci-hcd` at boot.
+Two self-contained build scripts, one per OS — each builds the app and its installer in one go:
+
+- Windows: `powershell -ExecutionPolicy Bypass -File .\build.ps1` → `dist\usbip-client.exe` and
+  `dist\usbip-client-<ver>-x64.msi` (WiX 3 is auto-downloaded to `tools\wix3`). One UAC prompt
+  installs the app, the usbip-win2 driver and autostart.
+- Linux: `./build.sh` → `dist/usbip-client` and `dist/usbip-client_<ver>_amd64.deb`
+  (auto-installs `cargo-deb` if missing; errors out with the exact `apt install` line if the
+  GTK/appindicator dev headers aren't present). Packages add XDG autostart and load `vhci-hcd` at
+  boot. For an `.rpm` instead: `cargo install cargo-generate-rpm && cargo generate-rpm`.
 
 ## Status / not yet verified
 
