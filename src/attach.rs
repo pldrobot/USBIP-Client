@@ -4,9 +4,15 @@
 //!  * Linux: talks to the kernel vhci_hcd sysfs interface directly (no usbip binary needed);
 //!    when not root, the privileged step is re-run through `pkexec usbip-client --attach ...`.
 
+use std::collections::HashMap;
+
 pub type Key = (String, String); // (host, busid)
 
-pub use imp::{attached, attach, detach, run_helper_if_requested};
+/// Attached devices, plus a display name for each where the OS reports one
+/// (Windows: the product line of `usbip port`).
+pub type Snapshot = (Vec<Key>, HashMap<Key, String>);
+
+pub use imp::{attach, detach, run_helper_if_requested, snapshot};
 
 #[cfg(windows)]
 mod imp {
@@ -50,20 +56,27 @@ mod imp {
         run(&["attach", "-r", host, "-b", busid]).map(|_| ())
     }
 
-    /// Parse `usbip port`: "Port 01: ..." blocks, with a "... -> usbip://host:3240/busid" line.
-    fn ports() -> Vec<(u32, Key)> {
-        let Ok(text) = run(&["port"]) else { return vec![] };
+    /// Parse `usbip port` (usbip-win2). Each device is a block:
+    ///   Port 01: device in use at Full Speed(12Mbps)
+    ///            QinHeng Electronics : CH340 serial converter (1a86:7523)
+    ///              -> usbip://192.168.2.237:3240/1-1
+    /// The first plain line after "Port NN" is the product name.
+    fn parse_ports(text: &str) -> Vec<(u32, Key, Option<String>)> {
         let mut out = vec![];
         let mut cur: Option<u32> = None;
+        let mut desc: Option<String> = None;
         for line in text.lines() {
             let t = line.trim();
             if let Some(rest) = t.strip_prefix("Port ") {
                 cur = rest.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok());
+                desc = None;
+            } else if cur.is_some() && desc.is_none() && !t.is_empty() && !t.starts_with("->") && !t.contains("usbip://") {
+                desc = Some(t.to_string());
             } else if let (Some(p), Some(i)) = (cur, t.find("usbip://")) {
                 let url = &t[i + 8..];
                 if let Some((hostport, busid)) = url.split_once('/') {
                     let host = hostport.split(':').next().unwrap_or(hostport);
-                    out.push((p, (host.to_string(), busid.trim().to_string())));
+                    out.push((p, (host.to_string(), busid.trim().to_string()), desc.take()));
                     cur = None;
                 }
             }
@@ -71,17 +84,63 @@ mod imp {
         out
     }
 
+    fn ports() -> Vec<(u32, Key, Option<String>)> {
+        let Ok(text) = run(&["port"]) else { return vec![] };
+        parse_ports(&text)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // Real output of usbip-win2 0.9.8.1 with the ESP32-S3 bridge attached.
+        const REAL: &str = "Imported USB devices\r\n====================\r\n\
+Port 01: device in use at Full Speed(12Mbps)\r\n\
+         QinHeng Electronics : CH340 serial converter (1a86:7523)\r\n\
+           -> usbip://192.168.2.237:3240/1-1\r\n\
+           -> remote bus/dev: 001/001\r\n\
+           -> serial: \r\n\
+           -> mode: zero-copy\r\n";
+
+        #[test]
+        fn parses_key_and_product_name() {
+            let v = parse_ports(REAL);
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0].0, 1);
+            assert_eq!(v[0].1, ("192.168.2.237".to_string(), "1-1".to_string()));
+            assert_eq!(v[0].2.as_deref(), Some("QinHeng Electronics : CH340 serial converter (1a86:7523)"));
+        }
+
+        #[test]
+        fn nothing_attached_is_empty() {
+            assert!(parse_ports("").is_empty());
+            assert!(parse_ports("Imported USB devices\n====================\n").is_empty());
+        }
+
+        #[test]
+        fn two_devices() {
+            let two = format!("{REAL}Port 02: device in use at Low Speed(1.5Mbps)\r\n   Logitech (046d:c077)\r\n     -> usbip://10.0.0.5:3240/2-1\r\n");
+            let v = parse_ports(&two);
+            assert_eq!(v.len(), 2);
+            assert_eq!(v[1].1, ("10.0.0.5".to_string(), "2-1".to_string()));
+            assert_eq!(v[1].2.as_deref(), Some("Logitech (046d:c077)"));
+        }
+    }
+
     pub fn detach(host: &str, busid: &str) -> Result<(), String> {
         let port = ports()
             .into_iter()
-            .find(|(_, k)| k.0 == host && k.1 == busid)
-            .map(|(p, _)| p)
+            .find(|(_, k, _)| k.0 == host && k.1 == busid)
+            .map(|(p, _, _)| p)
             .ok_or("device is not attached")?;
         run(&["detach", "-p", &port.to_string()]).map(|_| ())
     }
 
-    pub fn attached() -> Vec<Key> {
-        ports().into_iter().map(|(_, k)| k).collect()
+    pub fn snapshot() -> super::Snapshot {
+        let p = ports();
+        let keys = p.iter().map(|(_, k, _)| k.clone()).collect();
+        let names = p.into_iter().filter_map(|(_, k, d)| d.map(|d| (k, d))).collect();
+        (keys, names)
     }
 
     pub fn run_helper_if_requested() {}
@@ -89,7 +148,6 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::Key;
     use crate::proto;
     use std::io::Write;
     use std::os::unix::io::AsRawFd;
@@ -227,8 +285,9 @@ mod imp {
         Ok(())
     }
 
-    pub fn attached() -> Vec<Key> {
-        load().into_iter().map(|(_, _, h, b)| (h, b)).collect()
+    pub fn snapshot() -> super::Snapshot {
+        // vhci does not report a product name; the menu falls back to the last scan or the busid.
+        (load().into_iter().map(|(_, _, h, b)| (h, b)).collect(), Default::default())
     }
 
     /// `usbip-client --attach HOST BUSID` / `--detach PORT`: privileged helper entry point.
@@ -259,9 +318,8 @@ mod imp {
 
 #[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
-    use super::Key;
     pub fn attach(_: &str, _: &str) -> Result<(), String> { Err("unsupported OS".into()) }
     pub fn detach(_: &str, _: &str) -> Result<(), String> { Err("unsupported OS".into()) }
-    pub fn attached() -> Vec<Key> { vec![] }
+    pub fn snapshot() -> super::Snapshot { (vec![], Default::default()) }
     pub fn run_helper_if_requested() {}
 }

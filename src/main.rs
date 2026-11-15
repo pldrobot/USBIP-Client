@@ -6,7 +6,7 @@ mod logo;
 mod proto;
 
 use discover::Server;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -15,7 +15,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 enum Ev {
     Scanned(Vec<Server>),
-    Attached(Vec<attach::Key>),
+    Attached(Vec<attach::Key>, HashMap<attach::Key, String>),
     Error(String),
     Menu(MenuEvent),
     /// An attach/detach thread for this device has finished.
@@ -27,46 +27,62 @@ fn icon(active: bool) -> Icon {
     Icon::from_rgba(logo::render_tray(64, active), 64, 64).expect("icon")
 }
 
-fn build_menu(servers: &[Server], attached: &[attach::Key], error: &Option<String>) -> Menu {
-    let menu = Menu::new();
-    if !attached.is_empty() {
-        for (host, busid) in attached {
-            let dev = servers
+/// Name for an attached device: what the OS reports (vendor and product), else what the last scan
+/// knew about it, else the bus id.
+fn device_label(servers: &[Server], names: &HashMap<attach::Key, String>, key: &attach::Key) -> String {
+    names
+        .get(key)
+        .cloned()
+        .or_else(|| {
+            servers
                 .iter()
-                .filter(|s| s.host == *host)
+                .filter(|s| s.host == key.0)
                 .flat_map(|s| s.devices.iter())
-                .find(|d| d.busid == *busid)
+                .find(|d| d.busid == key.1)
                 .map(|d| d.label())
-                .unwrap_or_else(|| busid.to_string());
-            let _ = menu.append(&MenuItem::with_id(
-                format!("conn|{host}|{busid}"),
-                format!("● Connected: {host} — {dev}"),
-                false,
-                None,
-            ));
-        }
+        })
+        .unwrap_or_else(|| key.1.clone())
+}
+
+fn build_menu(
+    servers: &[Server],
+    attached: &[attach::Key],
+    names: &HashMap<attach::Key, String>,
+    error: &Option<String>,
+) -> Menu {
+    let menu = Menu::new();
+    // Connected devices first: one checked entry each, click to detach. An attached server does not
+    // answer scans with its device (it is in use), so these entries do not depend on the scan.
+    for key in attached {
+        let (host, busid) = key;
+        let _ = menu.append(&CheckMenuItem::with_id(
+            format!("dev|{host}|{busid}"),
+            format!("\u{25CF} {host} \u{2014} {}", device_label(servers, names, key)),
+            true,
+            true,
+            None,
+        ));
+    }
+    if !attached.is_empty() {
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
-    let mut any = false;
+    let mut any = !attached.is_empty();
+    // Then the other servers and devices found on the LAN, without repeating attached ones.
     for s in servers {
+        let host_attached = attached.iter().any(|(h, _)| *h == s.host);
         if s.devices.is_empty() {
-            let _ = menu.append(&MenuItem::with_id(format!("none|{}", s.host), format!("{} (no device)", s.host), false, None));
-            any = true;
+            if !host_attached {
+                let _ = menu.append(&MenuItem::with_id(format!("none|{}", s.host), format!("{} (no device)", s.host), false, None));
+                any = true;
+            }
+            continue;
         }
         for d in &s.devices {
-            let on = attached.iter().any(|(h, b)| *h == s.host && *b == d.busid);
+            if attached.iter().any(|(h, b)| *h == s.host && *b == d.busid) {
+                continue;
+            }
             let id = format!("dev|{}|{}", s.host, d.busid);
-            let _ = menu.append(&CheckMenuItem::with_id(id, format!("{} — {}", s.host, d.label()), true, on, None));
-            any = true;
-        }
-    }
-    // A server we're attached to usually stops answering scans (it's busy serving us), so it
-    // may be missing from `servers`. Keep it in the menu so it can still be detached.
-    for (host, busid) in attached {
-        let listed = servers.iter().any(|s| s.host == *host && s.devices.iter().any(|d| d.busid == *busid));
-        if !listed {
-            let id = format!("dev|{host}|{busid}");
-            let _ = menu.append(&CheckMenuItem::with_id(id, format!("{host} — {busid}"), true, true, None));
+            let _ = menu.append(&CheckMenuItem::with_id(id, format!("{} \u{2014} {}", s.host, d.label()), true, false, None));
             any = true;
         }
     }
@@ -75,7 +91,7 @@ fn build_menu(servers: &[Server], attached: &[attach::Key], error: &Option<Strin
     }
     if let Some(e) = error {
         let short: String = e.chars().take(80).collect();
-        let _ = menu.append(&MenuItem::with_id("err", format!("⚠ {short}"), false, None));
+        let _ = menu.append(&MenuItem::with_id("err", format!("\u{26A0} {short}"), false, None));
     }
     let _ = menu.append(&MenuItem::with_id("refresh", "Refresh", true, None));
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -90,10 +106,11 @@ fn spawn_poller(proxy: EventLoopProxy<Ev>, rescan: std::sync::mpsc::Receiver<()>
             let manual = rescan.recv_timeout(Duration::from_secs(10)).is_ok();
             if manual || ticks % 3 == 0 {
                 // Do not probe servers we are attached to: it only disturbs the session.
-                let skip: HashSet<String> = attach::attached().into_iter().map(|(h, _)| h).collect();
+                let skip: HashSet<String> = attach::snapshot().0.into_iter().map(|(h, _)| h).collect();
                 let _ = proxy.send_event(Ev::Scanned(discover::scan(&skip)));
             }
-            let _ = proxy.send_event(Ev::Attached(attach::attached()));
+            let (a, n) = attach::snapshot();
+            let _ = proxy.send_event(Ev::Attached(a, n));
             ticks += 1;
         }
     });
@@ -116,6 +133,7 @@ fn main() {
     let mut tray: Option<TrayIcon> = None;
     let mut servers: Vec<Server> = vec![];
     let mut attached: Vec<attach::Key> = vec![];
+    let mut names: HashMap<attach::Key, String> = HashMap::new();
     let mut error: Option<String> = None;
     // Devices with an attach/detach in progress: a second click must not start another one.
     let mut busy: HashSet<attach::Key> = HashSet::new();
@@ -128,7 +146,7 @@ fn main() {
                 tray = TrayIconBuilder::new()
                     .with_tooltip("USB/IP Client")
                     .with_icon(icon(false))
-                    .with_menu(Box::new(build_menu(&servers, &attached, &error)))
+                    .with_menu(Box::new(build_menu(&servers, &attached, &names, &error)))
                     .build()
                     .map_err(|e| eprintln!("tray: {e}"))
                     .ok();
@@ -144,9 +162,10 @@ fn main() {
                 servers = s;
                 refresh_ui = true;
             }
-            Event::UserEvent(Ev::Attached(a)) => {
-                if a != attached {
+            Event::UserEvent(Ev::Attached(a, n)) => {
+                if a != attached || n != names {
                     attached = a;
+                    names = n;
                     refresh_ui = true;
                 }
             }
@@ -179,7 +198,8 @@ fn main() {
                                 if let Err(e) = r {
                                     let _ = p.send_event(Ev::Error(e));
                                 }
-                                let _ = p.send_event(Ev::Attached(attach::attached()));
+                                let (a, n) = attach::snapshot();
+                                let _ = p.send_event(Ev::Attached(a, n));
                                 let _ = p.send_event(Ev::Done(key));
                             });
                         }
@@ -190,12 +210,12 @@ fn main() {
         }
         if refresh_ui {
             if let Some(t) = &tray {
-                t.set_menu(Some(Box::new(build_menu(&servers, &attached, &error))));
+                t.set_menu(Some(Box::new(build_menu(&servers, &attached, &names, &error))));
                 t.set_icon(Some(icon(!attached.is_empty()))).ok();
-                let tip = if attached.is_empty() {
-                    "USBIP Client".to_string()
-                } else {
-                    format!("USBIP Client - {} device(s) attached", attached.len())
+                let tip = match attached.as_slice() {
+                    [] => "USBIP Client".to_string(),
+                    [one] => format!("USBIP Client - attached: {}", device_label(&servers, &names, one)),
+                    many => format!("USBIP Client - {} devices attached", many.len()),
                 };
                 t.set_tooltip(Some(tip)).ok();
             }
