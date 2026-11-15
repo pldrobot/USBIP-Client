@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "usbip-client"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "libc",
  "tao",

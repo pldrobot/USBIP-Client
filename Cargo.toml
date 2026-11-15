@@ -1,6 +1,6 @@
 [package]
 name = "usbip-client"
-version = "0.1.2"
+version = "1.0.0"
 edition = "2021"
 description = "System-tray USB/IP client: lists ESP32 USB/IP servers on the LAN and attaches their devices"
 license = "MIT"
