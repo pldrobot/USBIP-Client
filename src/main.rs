@@ -6,6 +6,7 @@ mod logo;
 mod proto;
 
 use discover::Server;
+use std::collections::HashSet;
 use std::time::Duration;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -17,6 +18,8 @@ enum Ev {
     Attached(Vec<attach::Key>),
     Error(String),
     Menu(MenuEvent),
+    /// An attach/detach thread for this device has finished.
+    Done(attach::Key),
 }
 
 /// Tray icon: the logo, with a small green dot while something is attached.
@@ -86,7 +89,9 @@ fn spawn_poller(proxy: EventLoopProxy<Ev>, rescan: std::sync::mpsc::Receiver<()>
         loop {
             let manual = rescan.recv_timeout(Duration::from_secs(10)).is_ok();
             if manual || ticks % 3 == 0 {
-                let _ = proxy.send_event(Ev::Scanned(discover::scan()));
+                // Do not probe servers we are attached to: it only disturbs the session.
+                let skip: HashSet<String> = attach::attached().into_iter().map(|(h, _)| h).collect();
+                let _ = proxy.send_event(Ev::Scanned(discover::scan(&skip)));
             }
             let _ = proxy.send_event(Ev::Attached(attach::attached()));
             ticks += 1;
@@ -112,6 +117,8 @@ fn main() {
     let mut servers: Vec<Server> = vec![];
     let mut attached: Vec<attach::Key> = vec![];
     let mut error: Option<String> = None;
+    // Devices with an attach/detach in progress: a second click must not start another one.
+    let mut busy: HashSet<attach::Key> = HashSet::new();
 
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
@@ -147,6 +154,9 @@ fn main() {
                 error = Some(e);
                 refresh_ui = true;
             }
+            Event::UserEvent(Ev::Done(k)) => {
+                busy.remove(&k);
+            }
             Event::UserEvent(Ev::Menu(m)) => {
                 let id = m.id.0.as_str();
                 if id == "exit" {
@@ -156,17 +166,23 @@ fn main() {
                     let _ = rescan_tx.send(());
                 } else if let Some(rest) = id.strip_prefix("dev|") {
                     if let Some((host, busid)) = rest.split_once('|') {
-                        let (host, busid) = (host.to_string(), busid.to_string());
-                        let on = attached.iter().any(|(h, b)| *h == host && *b == busid);
-                        error = None;
-                        let p = proxy.clone();
-                        std::thread::spawn(move || {
-                            let r = if on { attach::detach(&host, &busid) } else { attach::attach(&host, &busid) };
-                            if let Err(e) = r {
-                                let _ = p.send_event(Ev::Error(e));
-                            }
-                            let _ = p.send_event(Ev::Attached(attach::attached()));
-                        });
+                        let key: attach::Key = (host.to_string(), busid.to_string());
+                        if busy.contains(&key) {
+                            refresh_ui = true; // already working on it: ignore, and undo the checkbox flip
+                        } else {
+                            busy.insert(key.clone());
+                            let on = attached.contains(&key);
+                            error = None;
+                            let p = proxy.clone();
+                            std::thread::spawn(move || {
+                                let r = if on { attach::detach(&key.0, &key.1) } else { attach::attach(&key.0, &key.1) };
+                                if let Err(e) = r {
+                                    let _ = p.send_event(Ev::Error(e));
+                                }
+                                let _ = p.send_event(Ev::Attached(attach::attached()));
+                                let _ = p.send_event(Ev::Done(key));
+                            });
+                        }
                     }
                 }
             }

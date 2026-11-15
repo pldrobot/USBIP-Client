@@ -1,5 +1,6 @@
 //! Server discovery: manual list (servers.txt) + /24 scan of the local subnet on port 3240.
 use crate::proto::{self, Device};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,13 +41,24 @@ fn manual_hosts() -> Vec<String> {
         .collect()
 }
 
-fn probe(host: &str, timeout: Duration) -> Option<Server> {
+/// `skip` holds the hosts we are attached to. Asking such a server for its device list only
+/// disturbs the session (a one-client server has to answer, log and drop the extra connection),
+/// and it would report no device anyway because the device is in use.
+///
+/// The returned `host` is always the resolved IP, so a server listed in servers.txt by name and
+/// the same server found by the /24 sweep are one entry, and it matches what `usbip port` reports.
+fn probe(host: &str, timeout: Duration, skip: &HashSet<String>) -> Option<Server> {
     let addr = (host, proto::PORT).to_socket_addrs().ok()?.next()?;
+    let ip = addr.ip().to_string();
+    if skip.contains(&ip) {
+        return None;
+    }
     let devices = proto::devlist(addr, timeout).ok()?;
-    Some(Server { host: host.to_string(), devices })
+    Some(Server { host: ip, devices })
 }
 
-pub fn scan() -> Vec<Server> {
+pub fn scan(skip: &HashSet<String>) -> Vec<Server> {
+    let skip = Arc::new(skip.clone());
     let found: Arc<Mutex<Vec<Server>>> = Arc::default();
     let mut hosts: Vec<(String, Duration)> = manual_hosts()
         .into_iter()
@@ -66,11 +78,11 @@ pub fn scan() -> Vec<Server> {
     let queue = Arc::new(Mutex::new(hosts));
     let workers: Vec<_> = (0..48)
         .map(|_| {
-            let (q, f) = (queue.clone(), found.clone());
+            let (q, f, sk) = (queue.clone(), found.clone(), skip.clone());
             std::thread::spawn(move || loop {
                 let next = q.lock().unwrap().pop();
                 let Some((h, t)) = next else { break };
-                if let Some(s) = probe(&h, t) {
+                if let Some(s) = probe(&h, t, &sk) {
                     let mut f = f.lock().unwrap();
                     if !f.iter().any(|x| x.host == s.host) {
                         f.push(s);
